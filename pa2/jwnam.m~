@@ -1,0 +1,150 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% This is the skeleton code of PA2 in EC5301 Computer Vision.              %
+% It will help you to implement the Structure-from-Motion method easily.   %
+% Using this skeleton is recommended, but it's not necessary.              %
+% You can freely modify it or you can implement your own program.          %
+% If you have a question, please send me an email to haegonj@gist.ac.kr    %
+%                                                      Prof. Hae-Gon Jeon  %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+close all;
+clear all;
+
+addpath('Givenfunctions');
+run('vlfeat/toolbox/vl_setup.m');
+
+%% Define constants and parameters
+% Constants ( need to be set )
+number_of_iterations_for_5_point    = 50000;
+
+
+% Thresholds ( need to be set )
+threshold_of_distance = 5.0e-6;
+
+% Matrices
+K               = [ 1698.873755 0.000000     971.7497705;
+                    0.000000    1698.8796645 647.7488275;
+                    0.000000    0.000000     1.000000 ];
+                
+Kinv = inv(K);
+
+SIFT_thresh = 3.0;
+inlier_thresh = 1.0e-5;
+inlier_mat = [inlier_thresh,inlier_thresh, inlier_thresh, inlier_thresh,inlier_thresh];
+
+%% Feature extraction and matching
+% Load images and extract features and find correspondences.
+% Fill num_Feature, Feature, Descriptor, num_Match and Match
+% hints : use vl_sift to extract features and get the descriptors.
+%        use vl_ubcmatch to find corresponding matches between two feature sets.
+img1 = single(rgb2gray(imread('data_2_sfm/sfm01.JPG')));
+img2 = single(rgb2gray(imread('data_2_sfm/sfm02.JPG')));
+original_img1 = imread('data_2_sfm/sfm01.JPG');
+original_img2 = imread('data_2_sfm/sfm02.JPG');
+[f1_o,d1] = vl_sift(img1,'EdgeThresh',7,'PeakThresh',3);
+[f2_o,d2] = vl_sift(img2,'EdgeThresh',7,'PeakThresh',3);
+
+[matches,scores] = vl_ubcmatch(d1,d2,SIFT_thresh);
+
+% get x,y coords
+f1_o = f1_o(1:2,:);
+f2_o = f2_o(1:2,:);
+f1_o = [f1_o(2,:); f1_o(1,:)];
+f2_o = [f2_o(2,:); f2_o(1,:)];
+f1 = [f1_o; ones(1,size(f1_o,2))];
+f2 = [f2_o; ones(1,size(f2_o,2))];
+f1 = Kinv * f1;
+f2 = Kinv * f2;
+
+M1 = f1(:,matches(1,:));
+M2 = f2(:,matches(2,:));
+
+num_match = size(scores,2);
+
+%% Initialization step
+% Estimate E using 8,7-point algorithm or calibrated 5-point algorithm and RANSAC
+
+maxima = 0;
+best_score = 100;
+best_E = ones(3,3);
+for i=1:number_of_iterations_for_5_point
+    % match
+    sample_matches = randsample(num_match,5);
+    % sample points
+    Q1 = f1(:,matches(1,sample_matches));
+    Q2 = f2(:,matches(2,sample_matches));
+    % five-point algorithm
+    Evec = calibrated_fivepoint(Q1,Q2);
+    Evec = reshape(Evec,3,3,size(Evec,2));
+    
+    for j=1:size(Evec,3)
+        E = Evec(:,:,j);
+        scores = abs(diag(transpose(M1) * E * M2));
+        inlier_cnt = sum(scores < inlier_thresh);
+        if inlier_cnt > maxima
+            maxima = inlier_cnt;
+            best_E = E;
+            best_score = sum(scores);
+        elseif inlier_cnt == maxima
+            if sum(scores) < best_score
+                best_E = E;
+                best_score = sum(scores);
+            end
+        end
+    end
+end
+E = best_E;
+
+% filter inliers
+M1 = f1(:,matches(1,:));
+M2 = f2(:,matches(2,:));
+F1 = [];
+F2 = [];
+inlier_mask = diag(M1' * E * M2) < inlier_thresh;
+for i=1:size(inlier_mask,1)
+    if inlier_mask(i)
+        F1 = [F1 [M1(:,i); f1_o(:,matches(1,i))]];
+        F2 = [F2 [M2(:,i); f2_o(:,matches(2,i))]];
+    end
+end
+fprintf('Inliers: %d\n', sum(inlier_mask));
+
+% Decomposing
+[U,d,V] = svd(E);   % SVD
+u3 = U(:,3);
+W = [0 -1 0; 1 0 0; 0 0 1];
+
+cams = [[U*W*V' u3]; [U*W*V' -u3]; [U*W'*V' u3]; [U*W'*V' -u3]];
+
+sample1 = F1(1:3,7);
+sample2 = F2(1:3,7);
+
+correct = cams(1:3,:);
+correct_cnt=0;
+for i=1:4
+    cam = cams(i:i+2,:);
+    pos = triangle2(cam,sample1,sample2,K);
+    
+    criterion1 = pos(3) > 0;
+    % second plane
+    origin2 = cam * [0;0;0;1];
+    one2 = cam * [0;0;1;1];
+    vec2 = one2 - origin2;
+    criterion2 = dot((pos(1:3) - origin2),vec2) > 0;
+    if (criterion1 && criterion2)
+        correct=cam;
+        correct_cnt = correct_cnt + 1;
+    end
+end
+fprintf('Correct:%d\n',correct_cnt);
+
+% 3D points
+X = [];
+for i=1:size(F1,2)
+    pos = triangle2(cam,F1(1:3,i),F2(1:3,i),K);
+    color = original_img1(round(F1(4,i)),round(F1(5,i)),:);
+    color = double(reshape(color,3,1)) / 255;
+    X = [X [pos(1:3); color] ];
+end
+
+SavePLY('mesh_jinwoo.ply',X);

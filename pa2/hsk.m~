@@ -1,0 +1,197 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% This is the skeleton code of PA2 in EC5301 Computer Vision.              %
+% It will help you to implement the Structure-from-Motion method easily.   %
+% Using this skeleton is recommended, but it's not necessary.              %
+% You can freely modify it or you can implement your own program.          %
+% If you have a question, please send me an email to haegonj@gist.ac.kr    %
+%                                                      Prof. Hae-Gon Jeon  %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+close all;
+clear all;
+
+addpath('Givenfunctions');
+run('vlfeat/toolbox/vl_setup.m');
+% mex Givenfunctions/calibrated_fivepoint_helper.c
+%% Define constants and parameters
+% Constants ( need to be set )
+number_of_iterations_for_5_point    = 50000;
+
+% Thresholds ( need to be set )
+threshold_of_distance = 5.0e-6; 
+
+edge_thresh = 7;
+peak_thresh = 3;
+match_thresh = 3.0;
+
+% Matrices
+K               = [ 1698.873755 0.000000     971.7497705;
+                    0.000000    1698.8796645 647.7488275;
+                    0.000000    0.000000     1.000000 ];
+                
+%% Feature extraction and matching
+% Load images and extract features and find correspondences.
+% Fill num_Feature, Feature, Descriptor, num_Match and Match
+% hints : use vl_sift to extract features and get the descriptors.
+%        use vl_ubcmatch to find corresponding matches between two feature sets.
+img1 = imread('data_2_sfm/sfm01.JPG');
+img2 = imread('data_2_sfm/sfm02.JPG');
+img1_g = single(rgb2gray(img1));
+img2_g = single(rgb2gray(img2));
+[f1, d1] = vl_sift(img1_g, 'EdgeThresh', edge_thresh, 'PeakThresh', peak_thresh);
+[f2, d2] = vl_sift(img2_g, 'EdgeThresh', edge_thresh, 'PeakThresh', peak_thresh);
+[matches, scores] = vl_ubcmatch(d1, d2, match_thresh);
+
+f1_m = f1([2,1], matches(1, :));
+f2_m = f2([2,1], matches(2, :));
+x1 = [f1_m; ones(1, size(f1_m, 2))];
+x2 = [f2_m; ones(1, size(f2_m, 2))];
+
+K_inv = inv(K);
+x1_ = K_inv*x1;
+x2_ = K_inv*x2;
+
+num_match = size(matches, 2);
+
+%% Plot SIFT
+figure(1) ; clf ;
+imagesc(cat(2, img1, img2)) ;
+
+xa = f1(1,matches(1,:)) ;
+xb = f2(1,matches(2,:)) + size(img1,2) ;
+ya = f1(2,matches(1,:)) ;
+yb = f2(2,matches(2,:)) ;
+
+hold on ;
+h = line([xa ; xb], [ya ; yb]) ;
+set(h,'linewidth', 1, 'color', 'b') ;
+
+vl_plotframe(f1(:,matches(1,:))) ;
+f2(1,:) = f2(1,:) + size(img1,2) ;
+vl_plotframe(f2(:,matches(2,:))) ;
+axis image off ;
+%% Initialization step
+% Estimate E using 8,7-point algorithm or calibrated 5-point algorithm and RANSAC
+max_inliers = 0;
+best_mse = 99999999.0;
+for i=1:number_of_iterations_for_5_point
+    sample_points = randsample(num_match, 5);
+    sample_x1 = x1_(:, sample_points);
+    sample_x2 = x2_(:, sample_points);
+    Evec = calibrated_fivepoint(sample_x1, sample_x2);
+    for j=1:size(Evec,2)
+        E = reshape(Evec(:, j), 3, 3);
+        inliers = zeros(num_match, 1);
+        index = 1;
+        mse = 0;
+        for k=1:num_match
+            dist = abs(x1_(:, k)'*E*x2_(:, k));
+            if dist < threshold_of_distance;
+                inliers(index) = k;
+                index = index+1;
+                mse = mse + dist^2;
+            end
+        end
+        inliers_cnt = index-1;
+        if inliers_cnt > max_inliers
+            best_E = E;
+            max_inliers = inliers_cnt;
+            best_inliers = inliers(1:index-1);
+            best_mse = mse;
+        elseif inliers_cnt == max_inliers
+            if mse < best_mse
+                best_E = E;
+                max_inliers = inliers_cnt;
+                best_inliers = inliers(1:index-1);
+                best_mse = mse;
+            end
+        end
+    end
+end
+E = best_E;
+inliers = best_inliers;
+
+% Plot SIFT
+inmatches = matches(:, inliers);
+figure(2) ; clf ;
+imagesc(cat(2, img1, img2)) ;
+
+xa = f1(1,inmatches(1,:)) ;
+xb = f2(1,inmatches(2,:)) + size(img1,2) ;
+ya = f1(2,inmatches(1,:)) ;
+yb = f2(2,inmatches(2,:)) ;
+
+hold on ;
+h = line([xa ; xb], [ya ; yb]) ;
+set(h,'linewidth', 1, 'color', 'b') ;
+
+vl_plotframe(f1(:,inmatches(1,:))) ;
+f2(1,:) = f2(1,:) + size(img1,2) ;
+vl_plotframe(f2(:,inmatches(2,:))) ;
+axis image off ;
+%% Decompose E into [R, T]
+W = [0  -1   0;
+     1   0   0;
+     0   0   0];
+
+[U,d,V] = svd(E);
+u3 = U(:, 3);
+cams = {[U*W*V' u3]; [U*W*V' -u3]; [U*W'*V' u3]; [U*W'*V' -u3]};
+
+x1_in = x1_(:, inliers);
+x2_in = x2_(:, inliers);
+
+test_x1 = x1_in(:, 1);
+test_x2 = x2_in(:, 1);
+x1_t = test_x1/norm(test_x1);
+x2_t = test_x2/norm(test_x2);
+true_cam = 0;
+
+for i=1:4
+    P = cams{i};
+    R = P(:, 1:3);
+    T = P(:, 4);
+    x2_t_ = R*x2_t;
+    cond_1 = x1_t'*T > x2_t_'*T;
+    cond_2 = cross(x1_t, T)'*cross(x2_t_, T) > 0;
+    if cond_1 && cond_2
+        if true_cam == 0
+            true_cam = i;
+        else
+            fprintf('error')
+        end
+    end
+end
+P2 = cams{true_cam};
+R = P(:, 1:3);
+T = P(:, 4);
+%% Reconstruct 3D points using triangulation
+P1 = [  1   0   0   0;
+        0   1   0   0;
+        0   0   1   0];
+
+X_in = zeros(4, max_inliers);
+
+for i=1:max_inliers
+    A = [x1_in(1, i)*P1(3, :) - P1(1, :);
+        x1_in(2, i)*P1(3, :) - P1(2, :);
+        x2_in(1, i)*P2(3, :) - P2(1, :);
+        x2_in(2, i)*P2(3, :) - P2(2, :)];
+    [U,d,V] = svd(A);
+    X = V(:, 4);
+    X_in(:, i) = X/X(4);
+end;
+X = X_in;
+x_1 = f1_m(:, inliers);
+x_2 = f2_m(:, inliers);
+
+X_with_color = zeros(6, max_inliers);
+for i=1:max_inliers
+    color = img1(round(x_1(1, i)), round(x_1(2, i)), :);
+    %color2 = img2(round(x_2(1, i)), round(x_2(2, i)), :);
+    %color = round((color1 + color2)/2);
+    color = double(reshape(color,3,1)) / 255;
+    X_with_color(:, i) = [X(1:3, i); color];
+end
+%% Save 3D points to PLY
+SavePLY('2_views_hsk.ply', X_with_color);
